@@ -1,0 +1,23 @@
+/////constructor语句
+
+public Animal()
+:this("No Name", "No Sound") {}
+
+public Animal(string name)
+:this(name, "No Sound") {}
+
+public Animal(string name, sring sound)
+:this("No Name", "No Sound") {}
+
+冒号代表默认值
+
+////检查string中是否有Number
+if (!name.Any(char.IsDigit))
+{
+this.name = name;
+} else
+{
+this.name = "No Name";
+Console.WiteLine("Name can't contain numbers");
+}
+
