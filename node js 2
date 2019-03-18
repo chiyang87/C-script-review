@@ -15,3 +15,17 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(3000);
+
+
+
+redirect web page的操作
+
+const method = req.method;
+
+if (url === '/message' && methond === 'POST') {
+fs.writeFileSync('message.txt', 'DUMMY');
+res.statusCode = 302 //redirect
+res.setHeader('Location', '/');
+return res.end();
+
+}
