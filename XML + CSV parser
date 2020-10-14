@@ -1,0 +1,1516 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Diagnostics;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.IO.Compression;
+using System.IO;
+using System.Xml;
+using Microsoft.VisualBasic.FileIO;
+
+namespace KistlerXMLparser
+{
+    public partial class Form2 : Form
+    {
+
+        private string zipFileName;
+        private string fileName;
+        private string folderName;
+        private string prevFolderName;
+        private string prevBatchName;
+        private string BeginTime;
+        private string EndTime;
+        private string PartCount;
+        private string SerialNo;
+        private string TestResult;
+        public string csvModule;
+
+        private StreamWriter swProcessData;
+        private StreamWriter swCurveData;
+        private StreamWriter swErrorData;
+        int StartLine1;
+        int StartLine2;
+        private string PeakForce;
+        private string PressForcePosition;
+        private string PressForce;
+        private string TestType;
+
+        List<string> ColumnNames = new List<string>();
+        string processHeader;
+
+        public Form2()
+        {
+            
+            InitializeComponent();
+            chkInclueTime.Hide();
+            chkUseFolderName.Hide();
+        }
+        
+
+        private void btnLoadFiles_Click(object sender, EventArgs e)
+        {
+            this.openFileDialog1.Filter =
+"Kistler Files (*.ZIP)|*.ZIP|" +
+"All files (*.*)|*.*";
+
+            // Allow the user to select multiple images.
+            this.openFileDialog1.Multiselect = true;
+            this.openFileDialog1.Title = "Kistler Zip Browser";
+
+
+            DialogResult dr = this.openFileDialog1.ShowDialog();
+            if (dr == System.Windows.Forms.DialogResult.OK)
+            {
+                // Read the files
+                foreach (String file in openFileDialog1.FileNames)
+                {
+                    // Create a PictureBox.
+                    try
+                    {
+                        string[] row = { file, "", "", "" };
+                        var listViewItem = new ListViewItem(row);
+                        listView1.Items.Add(listViewItem);
+
+                    }
+                    catch (Exception ex)
+                    {
+                        // Could not load the image - probably related to Windows file system permissions.
+                        MessageBox.Show("Cannot display the image: " + file.Substring(file.LastIndexOf('\\'))
+                            + ". You may not have permission to read the file, or " +
+                            "it may be corrupt.\n\nReported error: " + ex.Message);
+                    }
+                }
+
+            }
+        }
+
+        private void btnSelectFolder_Click(object sender, EventArgs e)
+        {
+            using (var fbd = new FolderBrowserDialog())
+            {
+                DialogResult result = fbd.ShowDialog();
+
+                if (result == DialogResult.OK && !string.IsNullOrWhiteSpace(fbd.SelectedPath))
+                {
+                    txtDestinationPath.Text = fbd.SelectedPath;
+
+
+                }
+            }
+        }
+
+        private void btnRemoveFile_Click(object sender, EventArgs e)
+        {
+            foreach (ListViewItem eachItem in listView1.SelectedItems)
+            {
+
+                listView1.Items.Remove(eachItem);
+
+            }
+        }
+
+        private void btnCancel_Click(object sender, EventArgs e)
+        {
+            // Cancel the asynchronous operation.
+            this.backgroundWorker1.CancelAsync();
+        }
+
+        private void btnParse_Click(object sender, EventArgs e)
+        {
+            btnParse.Enabled = false;
+            backgroundWorker1.RunWorkerAsync();
+        }
+
+        private void backgroundWorker1_DoWork(object sender, DoWorkEventArgs e)
+        {
+            BackgroundWorker worker = sender as BackgroundWorker;
+            var watch = Stopwatch.StartNew();
+            
+            //Process each CorveData file in the list
+            int listIndex = 0;
+            
+            while (listIndex < listView1.Items.Count)
+            {
+
+                //Get the list item to process
+                listView1.Invoke(new Action(() =>
+                {
+                    fileName = listView1.Items[listIndex].SubItems[0].Text;
+                }
+                ));
+
+                if (fileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                {
+                    parseZipFiles(listIndex, worker, e);
+                }
+                else
+                {
+                    parseDirectory(listIndex, worker, e);
+
+                }
+
+
+                listIndex++;
+            }
+
+
+            // Close the Process and Curve Data files if already open
+            if (swProcessData != null)
+            {
+                swProcessData.Close();
+            }
+
+            if (swCurveData != null)
+            {
+                swCurveData.Close();
+            }
+
+            if (swErrorData!=null)
+            {
+                MessageBox.Show("Error occurred. See error.csv for detail.");
+            }
+
+            MessageBox.Show(string.Format("Finished parsing {0} ZIP files!", listIndex),
+                                                        "XML-CSV Parser", MessageBoxButtons.OK,
+                                        MessageBoxIcon.Information);
+        }
+
+        private void parseZipFiles(int listIndex, BackgroundWorker worker, DoWorkEventArgs e)
+        {
+            var watch = Stopwatch.StartNew();
+            int recordssProcessed = 0;
+            string BatchName = "";
+            string FolderName = "";
+
+
+            // Start the stopwatch for each curve file processed
+            watch.Reset();
+            watch.Start();
+
+            listView1.Invoke(new Action(() =>
+            {
+                zipFileName = listView1.Items[listIndex].SubItems[0].Text;
+                listView1.Items[listIndex].BackColor = Color.Yellow;
+                listView1.Items[listIndex].SubItems[2].Text = "Preparing Data";
+            }
+            ));
+
+
+
+
+            using (ZipArchive archive = ZipFile.OpenRead(zipFileName))
+            {
+
+                switch (csvModule)
+                {
+                    case "OMCSV":
+                        FolderName = zipFileName.Substring(zipFileName.Length - 7, 3);
+                        break;
+                    case "LU_AAI_CSV":
+                        string[] pathArr = zipFileName.Split('\\');
+                        string[] fileArr = pathArr.Last().Split('.');
+                        FolderName = fileArr[0].ToString();
+                        BatchName = FolderName;
+                        break;
+                    case "Nypro_Promess_CSV":
+                        string[] pathArr2 = zipFileName.Split('\\');
+                        string[] fileArr2 = pathArr2.Last().Split('-');
+                        FolderName = fileArr2[1];
+                        BatchName = FolderName;
+                        break;
+                }
+
+
+
+                if (chkUseFolderName.Checked)
+                {
+                    BatchName = FolderName;
+
+                }
+
+                //Process each entry in the ZIP file
+                foreach (ZipArchiveEntry entry in archive.Entries)
+                {
+
+                    if (worker.CancellationPending == true)
+                    {
+                        e.Cancel = true;
+
+                        // Close the Process and Curve Data files if already open
+                        if (swProcessData != null)
+                        {
+                            swProcessData.Close();
+                        }
+
+                        if (swCurveData != null)
+                        {
+                            swCurveData.Close();
+                        }
+
+
+                        MessageBox.Show("XML Parsing canceled",
+                                                                "XML Parser", MessageBoxButtons.OK,
+                                                MessageBoxIcon.Information);
+                        return;
+                    }
+
+                    try
+                    {
+                        if (entry.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) )
+                        {
+                            recordssProcessed++;
+                            if (recordssProcessed % 100 == 0)
+                            {
+                                listView1.Invoke(new Action(() =>
+                                {
+                                    listView1.Items[listIndex].SubItems[1].Text = recordssProcessed.ToString();
+                                    listView1.Items[listIndex].SubItems[2].Text = entry.FullName;
+                                    listView1.Items[listIndex].SubItems[3].Text = watch.Elapsed.ToString();
+
+                                }
+                                ));
+                            }
+
+                            if (Int32.Parse(entry.Name.Length.ToString()) < 21)
+                            {
+                                using (StreamReader reader = new StreamReader(entry.Open()))
+                                {
+                                    XmlDocument xmlDoc = new XmlDocument();
+                                    xmlDoc.LoadXml(reader.ReadToEnd());
+
+                                    parseXML2(BatchName, xmlDoc);
+
+
+                                }
+                            }
+                            else
+                            {
+                                using (StreamReader reader = new StreamReader(entry.Open()))
+                                {
+                                    XmlDocument xmlDoc = new XmlDocument();
+                                    xmlDoc.LoadXml(reader.ReadToEnd());
+
+                                    parseXML(FolderName, BatchName, xmlDoc);
+
+
+                                }
+                            }
+                        }
+
+                        else if (entry.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+                        {
+
+                            recordssProcessed++;
+                            if (recordssProcessed % 100 == 0)
+                            {
+                                listView1.Invoke(new Action(() =>
+                                {
+                                    listView1.Items[listIndex].SubItems[1].Text = recordssProcessed.ToString();
+                                    listView1.Items[listIndex].SubItems[2].Text = entry.FullName;
+                                    listView1.Items[listIndex].SubItems[3].Text = watch.Elapsed.ToString();
+
+                                }
+                                ));
+                            }
+                            using (TextFieldParser reader = new TextFieldParser(entry.Open()))
+                            {
+                                // This section is changed to take in value of csv by lines. "entry" is the path of csv files. 
+                                //The TextFieldParser will parse the csv file to create field. Visual Basic add on is used to this end.
+                                // parseCSV function is defined below.
+                                switch (csvModule)
+                                {
+                                    case "OMCSV":
+
+                                        parseOMCSV(FolderName, BatchName, reader);
+                                        break;
+                                    case "LU_AAI_CSV":
+
+                                        parseLU_AAI_CSV(FolderName, BatchName, reader);
+                                        break;
+                                    case "Nypro_Promess_CSV":
+                                        parseCSV_Nypro_Promess(FolderName, BatchName, reader);
+                                        break;
+
+                                }
+                                //parseOMCSV(FolderName, BatchName, reader);
+                            }
+
+
+                        }
+
+
+
+                    }
+                    catch (Exception)
+                    {
+                        string errorLog = txtDestinationPath.Text + string.Format(@"\error.csv");
+
+                        //MessageBox.Show(File.Exists(errorLog).ToString());
+                        if (File.Exists(errorLog))
+                        {
+                            swErrorData = new StreamWriter(errorLog, true);
+                        }
+                        else
+                        {
+                            swErrorData = new StreamWriter(errorLog, true);
+                            swErrorData.WriteLine(string.Format("Error message, Cycle file, Zip file"));
+                        }
+                        swErrorData.WriteLine("error occurred " + "," + entry.ToString() + "," + zipFileName.ToString());
+                        swErrorData.Close();
+                    }
+
+
+                }
+
+                listView1.Invoke(new Action(() =>
+                {
+                    listView1.Items[listIndex].BackColor = Color.White;
+                    listView1.Items[listIndex].SubItems[1].Text = recordssProcessed.ToString();
+                    listView1.Items[listIndex].SubItems[2].Text = "Done";
+                    listView1.Items[listIndex].SubItems[3].Text = watch.Elapsed.ToString();
+
+                }
+));
+            }
+
+
+        }
+
+
+        private void parseDirectory(int listIndex, BackgroundWorker worker, DoWorkEventArgs e)
+        {
+
+            var watch = Stopwatch.StartNew();
+            int recordssProcessed = 0;
+            string BatchName = "";
+            string FolderName = "";
+
+            // Start the stopwatch for each curve file processed
+            watch.Reset();
+            watch.Start();
+
+            //Get the folder name from the list
+            listView1.Invoke(new Action(() =>
+            {
+                folderName = listView1.Items[listIndex].SubItems[0].Text;
+                listView1.Items[listIndex].BackColor = Color.Yellow;
+                listView1.Items[listIndex].SubItems[2].Text = "Preparing Data";
+            }
+            ));
+
+            FolderName = new System.IO.DirectoryInfo(folderName).Name;
+            int lastSlash = FolderName.LastIndexOf('-');
+            FolderName = (lastSlash > 0) ? FolderName.Substring(lastSlash + 1).Trim() : FolderName;
+
+            if (chkUseFolderName.Checked)
+            {
+                BatchName = FolderName;
+            }
+
+            // Create the ProcessData.csv column headers
+            foreach (string fileName in Directory.GetFiles(folderName))
+            {
+
+                if (fileName.EndsWith("_OK.xml", StringComparison.OrdinalIgnoreCase))
+                {
+
+                    using (FileStream fs = new FileStream(fileName, FileMode.Open, FileAccess.Read))
+                    {
+                        XmlDocument xmlDoc = new XmlDocument();
+                        xmlDoc.Load(fs);
+
+                        BuildHeader(xmlDoc);
+
+                    }
+
+                    break;
+                }
+            }
+
+            // Process each file in the directory
+            foreach (string fileName in Directory.GetFiles(folderName))
+            {
+
+                if (worker.CancellationPending == true)
+                {
+                    e.Cancel = true;
+
+                    // Close the Process and Curve Data files if already open
+                    if (swProcessData != null)
+                    {
+                        swProcessData.Close();
+                    }
+
+                    if (swCurveData != null)
+                    {
+                        swCurveData.Close();
+                    }
+
+
+                    MessageBox.Show("XML Parsing canceled",
+                                                            "XML Parser", MessageBoxButtons.OK,
+                                            MessageBoxIcon.Information);
+
+
+                    return;
+                }
+
+                if (fileName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+                {
+
+                    recordssProcessed++;
+                    if (recordssProcessed % 100 == 0)
+                    {
+                        listView1.Invoke(new Action(() =>
+                        {
+                            listView1.Items[listIndex].SubItems[1].Text = recordssProcessed.ToString();
+                            listView1.Items[listIndex].SubItems[2].Text = fileName;
+                            listView1.Items[listIndex].SubItems[3].Text = watch.Elapsed.ToString();
+
+                        }
+                        ));
+                    }
+
+
+                    using (FileStream fs = new FileStream(fileName, FileMode.Open, FileAccess.Read))
+                    {
+                        XmlDocument xmlDoc = new XmlDocument();
+                        xmlDoc.Load(fs);
+
+                        parseXML(FolderName, BatchName, xmlDoc);
+
+                    }
+                }
+
+
+            }
+
+
+            listView1.Invoke(new Action(() =>
+            {
+                listView1.Items[listIndex].BackColor = Color.White;
+                listView1.Items[listIndex].SubItems[1].Text = recordssProcessed.ToString();
+                listView1.Items[listIndex].SubItems[2].Text = "Done";
+                listView1.Items[listIndex].SubItems[3].Text = watch.Elapsed.ToString();
+
+            }
+));
+
+
+        }
+
+        private void BuildHeader(XmlDocument xmlDoc)
+        {
+
+            //*********************************************************
+            // Create new ProcessData file with deault header record
+            //*********************************************************
+
+
+                // Add te column headers to the file.
+                processHeader = string.Format("{0}, CycleTime, CycleNumber, TestResult", (chkUseFolderName.Checked) ? "BatchName" : "FileName");
+
+                ColumnNames.Clear();
+
+                // Loop through the Process values and create header for each curve_related process object.
+                foreach (XmlNode EOtest in xmlDoc.SelectSingleNode("/Part_protocol/Process_values_-_curve_related").ChildNodes)
+                {
+                    processHeader += ", " + EOtest.Name;
+                    ColumnNames.Add("/Part_protocol/Process_values_-_curve_related/" + EOtest.Name);
+
+                }
+
+                // Loop through the Process values and create header for each EO_related process object.
+                foreach (XmlNode EOtest in xmlDoc.SelectSingleNode("/Part_protocol/Process_values_-_EO_related").ChildNodes)
+                {
+
+                    string EOname = EOtest.Name;
+
+                    foreach (XmlNode EOtestItem in EOtest.ChildNodes)
+                    {
+                        processHeader += ", " + EOname + "_" + EOtestItem.Name;
+                        ColumnNames.Add("/Part_protocol/Process_values_-_EO_related/" + EOname + "/" + EOtestItem.Name);
+
+                    }
+
+                }
+
+
+
+                // Loop through the Evaluation_objects values and create header for each object.
+                foreach (XmlNode EOtest in xmlDoc.SelectSingleNode("/Part_protocol/Evaluation_objects_settings").ChildNodes)
+                {
+
+                    string EOname = EOtest.Name;
+
+                    foreach (XmlNode EOtestItem in EOtest.ChildNodes)
+                    {
+                        processHeader += ", " + EOname + "_" + EOtestItem.Name;
+                        ColumnNames.Add("/Part_protocol/Evaluation_objects_settings/" + EOname + "/" + EOtestItem.Name);
+                    }
+
+                }
+
+            
+
+
+        }
+
+        private void parseXML(string FolderName, string BatchName, XmlDocument xmlDoc)
+        {
+
+            if (BatchName == "")
+            {
+
+                string NetworkName = xmlDoc.SelectSingleNode("/Part_protocol/Device_information/Network_name").Attributes.GetNamedItem("Value").Value; 
+
+
+                if ( NetworkName.Substring(0,5) == "STN19")
+                {
+                    BatchName = xmlDoc.SelectSingleNode("/Part_protocol/Result_information/Part_serial_number").Attributes.GetNamedItem("Value").Value + "-" + NetworkName;
+                    FolderName = BatchName;
+                }
+                else
+                {
+                    BatchName = xmlDoc.SelectSingleNode("/Part_protocol/Network_name").Attributes.GetNamedItem("Value").Value;
+                }
+            }
+
+            string CycleTime = xmlDoc.GetElementsByTagName("Date")[0].Attributes.GetNamedItem("Value").Value + " " + xmlDoc.GetElementsByTagName("Time")[0].Attributes.GetNamedItem("Value").Value; 
+            string CycleNumber = xmlDoc.GetElementsByTagName("Cycle_number")[0].Attributes.GetNamedItem("Value").Value;
+            string TestResult = xmlDoc.GetElementsByTagName("Total_result")[0].Attributes.GetNamedItem("Value").Value;
+            TestResult = (TestResult=="OK") ? "1" : "0";
+
+
+            // Check if this is a new batch
+            if (FolderName != prevFolderName)
+            {
+
+                // Close the Process and Curve Data files if already open
+                if (swProcessData != null)
+                {
+                    swProcessData.Close();
+                }
+
+
+                if (swCurveData != null)
+                {
+                    swCurveData.Close();
+                }
+
+
+
+                //*********************************************************
+                // Create new ProcessData file with deault header record
+                //*********************************************************
+
+                string processFile = txtDestinationPath.Text + string.Format(@"\ProcessData_{0}.csv", FolderName);
+
+
+
+                // Open the ProcessData.CSV file for append
+                if (File.Exists(processFile))
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+                }
+                else
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+
+ 
+                    // Write the header record to the ProcessData file
+                    swProcessData.WriteLine(processHeader);
+                }
+
+                //************************************************
+                // Create new CurveData file with default header
+                //************************************************
+
+                string curveFile = txtDestinationPath.Text + string.Format(@"\CurveData_{0}.csv", FolderName);
+
+                // Open the Curve Data file for append
+                if (File.Exists(curveFile))
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                }
+                else
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                    swCurveData.WriteLine(string.Format("{0}, CycleTime, CycleNumber, TestResult, N,{1} X, Y", (chkUseFolderName.Checked) ? "BatchName" : "FileName", (chkInclueTime.Checked) ? " Time," : ""));
+                }
+
+                prevFolderName = FolderName;
+
+            }
+
+
+            //***********************************************
+            // Add the Process Data records
+            //*************************************************
+
+            string processRow = string.Format("{0},{1},{2},{3}", BatchName, CycleTime, CycleNumber, TestResult);
+
+
+            // Loop through the Process values and create entry for each curve_related, EO_related and Evaluation_objects objects stored in the ColumnNames list
+            foreach (string cName in ColumnNames )
+            {
+                try
+                {
+                    processRow += ", " + xmlDoc.SelectSingleNode(cName).Attributes["Value"].Value;
+
+                }
+                catch
+                {
+                    processRow += ", ";
+                }
+
+            }
+
+
+            // Write the Process record
+            swProcessData.WriteLine(processRow);
+
+
+            // Add the Curve Data record
+            //*************************************************
+
+            int n = 0;
+            XmlNode curveNode = xmlDoc.GetElementsByTagName("Measuring_curve")[0];
+
+            foreach (XmlNode pointNode in curveNode.ChildNodes[1].ChildNodes)
+            {
+
+                n++;
+                string ct = pointNode.ChildNodes[0].Attributes.GetNamedItem("Value").Value;
+                string cx = pointNode.ChildNodes[1].Attributes.GetNamedItem("Value").Value;
+                string cy = pointNode.ChildNodes[2].Attributes.GetNamedItem("Value").Value;
+
+                // Add the CurveData record.
+                swCurveData.WriteLine(string.Format("{0},{1},{2},{3},{4}{5},{6},{7}", BatchName, CycleTime, CycleNumber, TestResult, n, (chkInclueTime.Checked) ? "," + ct : "", cx, cy));
+
+            }
+
+
+
+
+        }
+
+        // This section of parseCSV is revised to parse single csv file.
+        private void parseOMCSV(string FolderName, string BatchName, TextFieldParser csvDoc)
+        {
+
+
+            //csv content is parsed with delimiter.
+            csvDoc.TextFieldType = FieldType.Delimited;
+            csvDoc.SetDelimiters(",");
+
+
+            // Check if this is a new batch
+            if (FolderName != prevFolderName)
+            {
+
+                // Close the Curve Data files if already open
+                if (swProcessData != null)
+                {
+                    swProcessData.Close();
+                }
+
+                if (swCurveData != null)
+                {
+                    swCurveData.Close();
+                }
+                string processFile = txtDestinationPath.Text + string.Format(@"\ProcessData_{0}.csv", FolderName);
+                if (File.Exists(processFile))
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+                }
+                else
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+                    string processHeader = string.Format("BatchName, CycleTime, CycleNumber, TestResult, Block_X, Block_Y, Ref_X, Peak-peak_X, Peak-peak_Y, XMIN-X, XMIN-Y, XMAX-X, XMAX-Y, YMIN-X, YMIN-Y, YMAX-X, YMAX-Y, EO-01_Result, EO-01_Entry, EO-02_Result, EO-02_Entry, EO-03_Result, EO-04_Result, EO-05_Result, EO-06_Result, EO-07_Result, EO-08_Result, EO-09_Result, EO-10_Result, EO-01_Reaction, EO-01_X_reference, EO-01_Y-Reference, EO-01_XMin, EO-01_XMax, EO-01_YMin, EO-01_YMax, EO-01_Entry, EO-01_Exit, EO-01_Curve_part, EO-01_Catch_zone_X, EO-01_Catch_zone_Y, EO-01_EO_Name, EO-01_EO_description, EO-01_Re-entry_ignored, EO-01_Generate_statistics, EO-01_X-Hysteresis, EO-01_Y-Hysteresis, EO-02_Reaction, EO-02_X_reference, EO-02_Y-Reference, EO-02_XMin, EO-02_YMin, EO-02_Entry, EO-02_Exit, EO-02_Curve_part, EO-02_Catch_zone_X, EO-02_Catch_zone_Y, EO-02_EO_Name, EO-02_EO_description, EO-02_Re-entry_ignored, EO-02_Generate_statistics, EO-02_X-Hysteresis, EO-02_Y-Hysteresis, EO-03_Reaction, EO-03_X_reference, EO-03_Y-Reference, EO-03_XMin, EO-03_XMax, EO-03_YMin, EO-03_YMax, EO-03_Entry, EO-03_Exit, EO-03_Curve_part, EO-03_Catch_zone_X, EO-03_Catch_zone_Y, EO-03_EO_Name, EO-03_EO_description, EO-03_Re-entry_ignored, EO-03_Generate_statistics, EO-03_X-Hysteresis, EO-03_Y-Hysteresis, EO-03_Curve, EO-04_Reaction, EO-04_X_reference, EO-04_Y-Reference, EO-04_XMin, EO-04_XMax, EO-04_YMin, EO-04_YMax, EO-04_Entry, EO-04_Exit, EO-04_Curve_part, EO-04_Catch_zone_X, EO-04_Catch_zone_Y, EO-04_EO_Name, EO-04_EO_description, EO-04_Re-entry_ignored, EO-04_Generate_statistics, EO-04_X-Hysteresis, EO-04_Y-Hysteresis, EO-04_Curve, EO-05_Reaction, EO-05_X_reference, EO-05_Y-Reference, EO-05_XMin, EO-05_XMax, EO-05_YMin, EO-05_YMax, EO-05_Entry, EO-05_Exit, EO-05_Curve_part, EO-05_Catch_zone_X, EO-05_Catch_zone_Y, EO-05_EO_Name, EO-05_EO_description, EO-05_Re-entry_ignored, EO-05_Generate_statistics, EO-05_X-Hysteresis, EO-05_Y-Hysteresis, EO-05_Curve, EO-06_Reaction, EO-06_X_reference, EO-06_Y-Reference, EO-06_XMin, EO-06_XMax, EO-06_YMin, EO-06_YMax, EO-06_Entry, EO-06_Exit, EO-06_Curve_part, EO-06_Catch_zone_X, EO-06_Catch_zone_Y, EO-06_EO_Name, EO-06_EO_description, EO-06_Re-entry_ignored, EO-06_Generate_statistics, EO-06_X-Hysteresis, EO-06_Y-Hysteresis, EO-06_Curve, EO-07_Reaction, EO-08_Reaction, EO-09_Reaction, EO-10_Reaction");
+
+                    swProcessData.WriteLine(processHeader);
+                }
+
+
+                //************************************************
+                // Create new CurveData file with default header
+                //************************************************
+
+                string curveFile = txtDestinationPath.Text + string.Format(@"\CurveData_{0}.csv", FolderName);
+
+                // Open the Curve Data file for append
+                if (File.Exists(curveFile))
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                }
+                else
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                    string curveHeader = string.Format("BatchName,  CycleTime, CycleNumber, TestResult, N, Time, X,  Y");
+
+                    swCurveData.WriteLine(curveHeader);
+
+                }
+
+                prevFolderName = FolderName;
+
+            }
+
+
+
+            // listA is created to take in value of time stamp, cycle number and test result. i is the line index that increases with progress.
+
+            int i = 1;
+            int k = 146;
+
+            List<string> listA = new List<string>();
+            List<string> listB = new List<string>();
+            try
+            {
+                while (!csvDoc.EndOfData)
+                {
+                    //j is the column number of values.
+                    int j = 1;
+
+                    string[] fields = csvDoc.ReadFields();
+
+                    if (fields[0].ToString() == "s")
+                    {
+                        k = i + 1;
+                    }
+                    else
+                    {
+
+                    }
+                    
+                    foreach (string item in fields)
+                    {
+                        if (new[] { 5, 6, 7, 8 }.Contains(i) && j == 2)
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listA.Add(item);
+                            listB.Add(item);
+
+                        }
+                        else if (new[] { 16, 17, 18, 19,20 }.Contains(i) && j == 2)
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listB.Add(item);
+                        }
+                        else if (new[] { 16, 17, 18, 19, 20 }.Contains(i) && j == 5)
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listB.Add(item);
+                        }
+                        else if (new[] { 21, 22, 23 }.Contains(i) && j == 5)
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listB.Add(item);
+                        }
+                        else if (new[] { 26,27, 28, 29,30,31,32,33,34,35 }.Contains(i) && j==2)
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listB.Add(item);
+                        }
+                        else if (new[] { 26,27 }.Contains(i) && j == 3)
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listB.Add(item);
+                        }
+                        else if (new[] { 37,38, 39, 40, 41, 42, 43 }.Contains(i) && new[] {2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19 }.Contains(j))
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listB.Add(item);
+                        }
+                        else if (new[] { 39,40, 41, 42, 43 }.Contains(i) && new[] { 31 }.Contains(j))
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listB.Add(item);
+                        }
+                        else if (new[] { 44, 45, 46,47 }.Contains(i) && new[] { 2 }.Contains(j))
+                        {
+                            //store cycle time, cycle number and test result to a list.
+                            listB.Add(item);
+                        }
+                        else if (Enumerable.Range(k, 1175).Contains(i) && new[] { 1, 2, 3 }.Contains(j))
+                        {
+                            string CycleTime = listA[0].ToString() + " " + listA[1].ToString();
+                            string CycleNumber = listA[2].ToString();
+                            string TestResult = (listA[3].ToString() == "OK") ? "1" : "0";
+
+                            // skip the 1st column. Only take value on column 2 and 3.
+
+                            if (j == 1 && CycleTime != " ")
+                            {
+                                //export a line 
+                                swCurveData.Write(BatchName + "," + CycleTime + "," + CycleNumber + "," + TestResult + "," + (i - k + 1) + ",");
+                                swCurveData.Write(item + ",");
+                            }
+                            if (j == 2 && CycleTime != " ")
+                            {
+                                swCurveData.Write(item + ",");
+                            }
+                            if (j == 3 && CycleTime != " ")
+                            {
+                                //add value of column 3 and add a line return.
+                                swCurveData.Write(item);
+                                swCurveData.Write(System.Environment.NewLine);
+                            }
+                            
+
+                        }
+
+                        j++;
+
+                    }
+
+                    i++;
+
+                }
+                
+                swProcessData.Write(BatchName + "," + listB[0].ToString() + " " + listB[1].ToString() + "," + listB[2] + "," + listB[3] + "," + listB[4] + "," + listB[6] + "," + listB[8] + "," + listB[10] + "," + listB[12] + "," + listB[5] + "," + listB[7] + "," + listB[9] + "," + listB[11] + "," + listB[13] + "," + listB[14] + "," + listB[15] + "," + listB[16] + "," + listB[17] + "," + listB[18] + "," + listB[19] + "," + listB[20] + "," + listB[21] + "," + listB[22] + "," + listB[23] + "," + listB[24] + "," + listB[25] + "," + listB[26] + "," + listB[27] + "," + listB[28] + "," + listB[29] + "," + listB[30] + "," + listB[31] + "," + listB[32] + "," + listB[33] + "," + listB[34] + "," + listB[35] + "," + listB[36] + "," + listB[37] + "," + listB[38] + "," + listB[39] + "," + listB[40] + "," + listB[41] + "," + listB[42] + "," + listB[43] + "," + listB[44] + "," + listB[45] + "," + listB[46] + "," + listB[47] + "," + listB[48] + "," + listB[49] + "," + listB[50] + "," + listB[52] + "," + listB[54] + "," + listB[55] + "," + listB[56] + "," + listB[57] + "," + listB[58] + "," + listB[59] + "," + listB[60] + "," + listB[61] + "," + listB[62] + "," + listB[63] + "," + listB[64] + "," + listB[65] + "," + listB[66] + "," + listB[67] + "," + listB[68] + "," + listB[69] + "," + listB[70] + "," + listB[71] + "," + listB[72] + "," + listB[73] + "," + listB[74] + "," + listB[75] + "," + listB[76] + "," + listB[77] + "," + listB[78] + "," + listB[79] + "," + listB[80] + "," + listB[81] + "," + listB[82] + ","  + listB[83] + "," + listB[84] + "," + listB[85] + "," + listB[86] + "," + listB[87] + "," + listB[88] + "," + listB[89] + "," + listB[90] + "," + listB[91] + "," + listB[92] + "," + listB[93] + "," + listB[94] + "," + listB[95] + "," + listB[96] + "," + listB[97] + "," + listB[98] + "," + listB[99] + "," + listB[100] + "," + listB[101] + "," + listB[102] + "," + listB[103] + "," + listB[104] + "," + listB[105] + "," + listB[106] + "," + listB[107] + "," + listB[108] + "," + listB[109] + "," + listB[110] + "," + listB[111] + "," + listB[112] + "," + listB[113] + "," + listB[114] + "," + listB[115] + "," + listB[116] + "," + listB[117] + "," + listB[118] + "," + listB[119] + "," + listB[120] + "," + listB[121] + "," + listB[122] + "," + listB[123] + "," + listB[124] + "," + listB[125] + "," + listB[126] + "," + listB[127] + "," + listB[128] + "," + listB[129] + "," + listB[130] + "," + listB[131] + "," + listB[132] + "," + listB[133] + "," + listB[134] + "," + listB[135] + "," + listB[136] + "," + listB[137] + "," + listB[138] + "," + listB[139] + "," + listB[140] + "," + listB[141] + "," + listB[142] + "," + listB[143] + "," + listB[144] + System.Environment.NewLine);
+            }
+            catch (Exception)
+            {
+
+
+            }
+
+
+        }
+
+
+        // This section of parseCSV is revised to parse single csv file.
+        private void parseLU_AAI_CSV(string FolderName, string BatchName, TextFieldParser csvDoc)
+        {
+
+
+            //csv content is parsed with delimiter.
+            csvDoc.TextFieldType = FieldType.Delimited;
+            csvDoc.SetDelimiters(",");
+
+
+            // Check if this is a new batch
+            if (FolderName != prevFolderName)
+            {
+
+                // Close the Curve Data files if already open
+                if (swProcessData != null)
+                {
+                    swProcessData.Close();
+                }
+
+                if (swCurveData != null)
+                {
+                    swCurveData.Close();
+                }
+                string processFile = txtDestinationPath.Text + string.Format(@"\ProcessData_{0}.csv", FolderName);
+                if (File.Exists(processFile))
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+                }
+                else
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+                    string processHeader = string.Format("BatchName, BeginTime,  EndTime, PartCount, SerialNumber, PartStatus");
+
+                    swProcessData.WriteLine(processHeader);
+                }
+
+
+                //************************************************
+                // Create new CurveData file with default header
+                //************************************************
+
+                string curveFile = txtDestinationPath.Text + string.Format(@"\CurveData_{0}.csv", FolderName);
+
+                // Open the Curve Data file for append
+                if (File.Exists(curveFile))
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                }
+                else
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                    string curveHeader = string.Format("BatchName, Begin Time, End Time, Part Count, Serial Number, Part Status,N, X,Y");
+
+                    swCurveData.WriteLine(curveHeader);
+
+                }
+
+                prevFolderName = FolderName;
+
+            }
+
+            // listA is created to take in value of time stamp, cycle number and test result. i is the line index that increases with progress.
+
+            int i = 1;
+            int k = 10;
+            //List<string> listA = new List<string>();
+
+            try
+            {
+                while (!csvDoc.EndOfData)
+                {
+
+                    string[] fields = csvDoc.ReadFields();
+                    if (fields[0].ToString() == "Raw Curve Position")
+                    {
+                        k = i + 1;
+
+                    }
+                    else
+                    {
+
+                    }
+                    if (i == 2)
+                    {
+
+                        BeginTime = fields[0].ToString();
+                        EndTime = fields[1].ToString();
+                        PartCount = fields[2].ToString();
+                        SerialNo = fields[3].ToString();
+                        TestResult = (fields[4].ToString() == "OK") ? "1" : "0";
+
+
+                    }
+
+                    if (Enumerable.Range(k, 150).Contains(i) && fields[0].ToString() != "CRC")
+                    {
+
+                        swCurveData.Write(BatchName + "," + BeginTime + "," + EndTime + "," + PartCount + "," + SerialNo + "," + TestResult + "," + (i - k + 1) + "," + fields[0].ToString() + "," + fields[1].ToString());
+                        swCurveData.Write(System.Environment.NewLine);
+                    }
+                    else if (i == 6)
+                    {
+                        swProcessData.Write(BatchName + "," + BeginTime + "," + EndTime + "," + PartCount + "," + SerialNo + "," + TestResult);
+                        swProcessData.Write(System.Environment.NewLine);
+                    }
+
+
+
+                    i++;
+                }
+
+            }
+            catch (Exception)
+            {
+
+            }
+
+
+        }
+
+
+
+
+        // This section of parseCSV is revised to parse single csv file.
+        private void parseCSV_Nypro_Promess(string FolderName, string BatchName, TextFieldParser csvDoc)
+        {
+
+
+            //csv content is parsed with delimiter.
+            csvDoc.TextFieldType = FieldType.Delimited;
+            csvDoc.SetDelimiters(",");
+
+
+            // Check if this is a new batch
+            if (FolderName != prevFolderName)
+            {
+
+                // Close the Curve Data files if already open
+                if (swProcessData != null)
+                {
+                    swProcessData.Close();
+                }
+
+                if (swCurveData != null)
+                {
+                    swCurveData.Close();
+                }
+                string processFile = txtDestinationPath.Text + string.Format(@"\ProcessData_{0}.csv", FolderName);
+                if (File.Exists(processFile))
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+                }
+                else
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+                    string processHeader = string.Format("BatchName,BeginTime,EndTime,PartCount,SerialNumber,PartStatus,StartLine1,StartLine2");
+
+                    swProcessData.WriteLine(processHeader);
+                }
+
+
+                //************************************************
+                // Create new CurveData file with default header
+                //************************************************
+
+                string curveFile = txtDestinationPath.Text + string.Format(@"\CurveData_{0}.csv", FolderName);
+
+
+                // Open the Curve Data file for append
+                if (File.Exists(curveFile))
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                }
+                else
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                    string curveHeader = string.Format("BatchNumber, Begin Time, End Time, Part Count, Serial Number, Part Status,N, X,Y,PeakForce, PressForcePosition, PressForce, TestType");
+
+                    swCurveData.WriteLine(curveHeader);
+
+                }
+
+                prevFolderName = FolderName;
+
+            }
+
+            // listA is created to take in value of time stamp, cycle number and test result. i is the line index that increases with progress.
+
+            int i = 1;
+            StartLine1 = 1;
+            StartLine2 = 500;
+
+            //List<string> listA = new List<string>();
+
+            try
+            {
+
+                while (!csvDoc.EndOfData)
+                {
+                    //MessageBox.Show(i.ToString());
+                    //string[] bat = BatchName.Split('_');
+
+                    string[] fields = csvDoc.ReadFields();
+
+                    if (i == 2)
+                    {
+
+                        BeginTime = fields[0].ToString();
+                        EndTime = fields[1].ToString();
+                        PartCount = fields[2].ToString();
+                        SerialNo = fields[3].ToString();
+                        TestResult = (fields[4].ToString() == "OK") ? "1" : "0";
+                    }
+                    else
+                    {
+                    }
+                    if (fields[0].ToString() == "Peak Force")
+                    {
+                        PeakForce = fields[1].ToString();
+
+                    }
+                    if (fields[0].ToString() == "Press Force Position")
+                    {
+                        PressForcePosition = fields[1].ToString();
+
+                    }
+                    if (fields[0].ToString() == "Press Force")
+                    {
+                        PressForce = fields[1].ToString();
+
+                    }
+
+                    if (fields[0].ToString() == "ForceMonitoringUp")
+                    {
+                        TestType = "ForceMonitoringUp";
+                        StartLine1 = i + 3;
+                    }
+                    else
+                    {
+
+                    }
+                    if (fields[0].ToString() == "ForceMonitoringDown")
+                    {
+                        TestType = "ForceMonitoringDown";
+                        StartLine2 = i + 3;
+                    }
+                    else
+                    {
+
+                    }
+                    if (Enumerable.Range(StartLine1, StartLine2 - 3).Contains(i) && StartLine1 > 1 && StartLine2 == 500 && fields[0] != "------------" && fields[0] != "Name" && fields[0].ToString() != "CRC")
+                    {
+
+                        swCurveData.Write(BatchName.Substring(0, 10) + "," + BeginTime + "," + EndTime + "," + PartCount + "," + SerialNo + "," + TestResult + "," + (i - StartLine1 + 1) + "," + fields[0].ToString() + "," + fields[1].ToString() + "," + PeakForce + "," + PressForcePosition + "," + PressForce + "," + TestType);
+                        swCurveData.Write(System.Environment.NewLine);
+
+                    }
+                    else if (Enumerable.Range(StartLine2, 2000).Contains(i) && StartLine1 > 1 && fields[0].ToString() != "CRC")
+                    {
+                        swCurveData.Write(BatchName.Substring(0, 10) + "," + BeginTime + "," + EndTime + "," + PartCount + "," + SerialNo + "," + TestResult + "," + (i - StartLine2 + 1) + "," + fields[0].ToString() + "," + fields[1].ToString() + "," + PeakForce + "," + PressForcePosition + "," + PressForce + "," + TestType);
+                        swCurveData.Write(System.Environment.NewLine);
+
+                    }
+                    else if (fields[0].ToString() == "CRC")
+                    {
+                        swProcessData.Write(BatchName.Substring(0, 10) + "," + BeginTime + "," + EndTime + "," + PartCount + "," + SerialNo + "," + TestResult + "," + StartLine1 + "," + StartLine2);
+                        swProcessData.Write(System.Environment.NewLine);
+                    }
+                    else
+                    {
+                    }
+
+                    i++;
+                }
+
+            }
+            catch (Exception)
+            {
+                swProcessData.Write(BatchName + "Not processed");
+            }
+
+
+        }
+
+
+
+
+
+
+        private void parseXML2(string BatchName, XmlDocument xmlDoc)
+        {
+
+
+            if (BatchName == "")
+            {
+                if (xmlDoc.GetElementsByTagName("BatchDescription").Count > 0)
+                {
+                    BatchName = xmlDoc.GetElementsByTagName("BatchDescription")[0].InnerText;
+                }
+            }
+            string CycleTime = "";
+            if (xmlDoc.GetElementsByTagName("Time").Count > 0)
+            {
+                CycleTime = xmlDoc.GetElementsByTagName("Time")[0].InnerText.Replace("T", " ");
+            }
+            string CycleNumber = xmlDoc.GetElementsByTagName("CycleNumber")[0].InnerText;
+            string TestResult = xmlDoc.GetElementsByTagName("TotalResult")[0].InnerText;
+
+            string yMax_X = xmlDoc.GetElementsByTagName("yMax")[0].ChildNodes[0].InnerText;
+            string yMax_Y = xmlDoc.GetElementsByTagName("yMax")[0].ChildNodes[1].InnerText;
+            string yMin_X = xmlDoc.GetElementsByTagName("yMin")[0].ChildNodes[0].InnerText;
+            string yMin_Y = xmlDoc.GetElementsByTagName("yMin")[0].ChildNodes[1].InnerText;
+            string xMax = xmlDoc.GetElementsByTagName("xMax")[0].InnerText;
+            string xMin = xmlDoc.GetElementsByTagName("xMin")[0].InnerText;
+
+            // Check if this is a new batch
+            if (BatchName != prevBatchName)
+            {
+
+                // Close the Process and Curve Data files if already open
+                if (swProcessData != null)
+                {
+                    swProcessData.Close();
+                }
+
+                if (swCurveData != null)
+                {
+                    swCurveData.Close();
+                }
+
+
+
+                //*********************************************************
+                // Create new ProcessData file with deault header record
+                //*********************************************************
+
+                string processFile = txtDestinationPath.Text + string.Format(@"\ProcessData_{0}.csv", BatchName);
+
+
+                // Open the ProcessData.CSV file for append
+                if (File.Exists(processFile))
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+                }
+                else
+                {
+                    swProcessData = new StreamWriter(processFile, true);
+
+                    if (xmlDoc.GetElementsByTagName("ProcessData").Count > 0)
+                    {
+                        // Add te column headers to the file.
+                        string processHeader = "BatchName, CycleTime, CycleNumber, TestResult, yMax_X, yMax_Y, yMin_X, yMin_Y, xMax, xMin ";
+
+
+
+                        foreach (XmlNode processNode in xmlDoc.GetElementsByTagName("ProcessData")[0].ChildNodes)
+                        {
+                            var EOID = processNode.Attributes["Id"].Value;
+                            var EOType = processNode.Attributes["Type"].Value;
+                            var EOName = "";
+                            if (processNode.Attributes["Description"] != null)
+                            {
+                                EOName = processNode.Attributes["Description"].Value;
+                            }
+
+                            processHeader += ",EO" + EOID + "-" + EOName + " Result";
+
+                            int pValue = 0;
+
+                            foreach (XmlNode cNode in processNode.ChildNodes)
+                            {
+
+                                switch (cNode.Name)
+                                {
+
+                                    case "ProcessValue":
+                                        pValue++;
+                                        if (cNode.Attributes["ValueDescription"] != null)
+                                        {
+                                            processHeader += ", EO" + EOID + "-" + cNode.Attributes["ValueDescription"].Value + " Value";
+
+                                        }
+                                        else
+                                        {
+                                            processHeader += ", EO" + EOID + "-Value" + pValue.ToString();
+                                        }
+                                        break;
+
+                                    case "Position":
+                                        // Add the position columns for the EO test
+                                        foreach (XmlNode pNode in cNode.ChildNodes)
+                                        {
+                                            processHeader += ", EO" + EOID + "-" + EOName + " - " + pNode.Name;
+                                        }
+
+                                        break;
+                                }
+
+
+
+                            }
+
+
+                        }
+
+                        // Write the header record to the ProcessData file
+                        swProcessData.WriteLine(processHeader);
+                    }
+
+                }
+
+
+                //************************************************
+                // Create new CurveData file with default header
+                //************************************************
+
+                string curveFile = txtDestinationPath.Text + string.Format(@"\CurveData_{0}.csv", BatchName);
+
+                // Open the Curve Data file for append
+                if (File.Exists(curveFile))
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                }
+                else
+                {
+                    swCurveData = new StreamWriter(curveFile, true);
+                    swCurveData.WriteLine("BatchName, CycleTime, CycleNumber, TestResult, N, X, Y");
+                }
+
+                prevBatchName = BatchName;
+
+            }
+
+
+            //***********************************************
+            // Add the Process Data records
+            //*************************************************
+
+            if (xmlDoc.GetElementsByTagName("ProcessData").Count > 0)
+            {
+                string processRow = string.Format("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9}", BatchName, CycleTime, CycleNumber, TestResult, yMax_X, yMax_Y, yMin_X, yMin_Y, xMax, xMin);
+
+                foreach (XmlNode processNode in xmlDoc.GetElementsByTagName("ProcessData")[0].ChildNodes)
+                {
+                    var EOID = processNode.Attributes["Id"].Value;
+                    var EOType = processNode.Attributes["Type"].Value;
+                    var EOName = "";
+                    if (processNode.Attributes["Description"] != null)
+                    {
+                        EOName = processNode.Attributes["Description"].Value;
+                    }
+
+                    foreach (XmlNode cNode in processNode.ChildNodes)
+                    {
+                        switch (cNode.Name)
+                        {
+                            case "Result":
+                                processRow += "," + cNode.InnerText;
+                                break;
+
+                            case "ProcessValue":
+
+
+                                processRow += "," + cNode["Value"].InnerText;
+
+
+                                break;
+
+                            case "Position":
+                                foreach (XmlNode pNode in cNode.ChildNodes)
+                                {
+                                    processRow += "," + pNode.InnerText;
+                                }
+
+                                break;
+                        }
+                    }
+
+
+                }
+
+                // Write the Process record
+                swProcessData.WriteLine(processRow);
+            }
+
+            // Add the Curve Data record
+            //*************************************************
+            int n = 0;
+            XmlNode curveNode = xmlDoc.GetElementsByTagName("Curve")[0];
+            foreach (XmlNode pointNode in curveNode.ChildNodes)
+            {
+
+                n++;
+                //string cx = pointNode.ChildNodes[0].InnerText;
+                //string cy = pointNode.ChildNodes[1].InnerText;
+
+                string cx = pointNode["x"].InnerText;
+                string cy = pointNode["y"].InnerText;
+
+                // Add the CurveData record.
+                swCurveData.WriteLine(string.Format("{0},{1},{2},{3},{4},{5},{6}", BatchName, CycleTime, CycleNumber, TestResult, n, cx, cy));
+
+            }
+
+
+
+
+        }
+
+
+        private void backgroundWorker1_ProgressChanged(object sender, ProgressChangedEventArgs e)
+        {
+
+        }
+
+        private void backgroundWorker1_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
+        {
+
+        }
+
+        private string GetXMLValue(XmlNode EOtest)
+        {
+            try
+            {
+                return EOtest.Attributes.GetNamedItem("Value").Value;
+
+            }
+            catch (Exception)
+            {
+                return " ";
+            }
+
+        }
+
+        private void button1_Click(object sender, EventArgs e)
+        {
+
+            var fsd = new FolderSelectDialog();
+            fsd.Title = "Select folders with Kistler XML files";
+            fsd.InitialDirectory = @"c:\";
+            if (fsd.ShowDialog(IntPtr.Zero))
+            {
+                //Console.WriteLine(fsd.FileName);
+                foreach (string dirName in fsd.ofd.FileNames)
+                {
+
+                    try
+                    {
+                        string[] row = { dirName, "", "", "" };
+                        var listViewItem = new ListViewItem(row);
+                        listView1.Items.Add(listViewItem);
+
+                    }
+                    catch (Exception ex)
+                    {
+                        // Could not load the image - probably related to Windows file system permissions.
+                        MessageBox.Show("Cannot add directory name: " + dirName + "\n\nReported error: " + ex.Message);
+                    }
+
+
+                }
+
+            }
+
+        }
+
+        private void checkedListBox1_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            int index = checkedListBox1.SelectedIndex;
+            int count = checkedListBox1.Items.Count;
+            for (int x=0; x<count; x++)
+            {
+                if (index != x)
+                {
+                    checkedListBox1.SetItemChecked(x,false);
+                }
+            }
+
+            switch (checkedListBox1.SelectedIndex)
+            {
+                case 0:
+                    
+                    chkUseFolderName.Checked = false; chkInclueTime.Checked = false;
+                    break;
+                case 1:
+                    chkUseFolderName.Checked = false; chkInclueTime.Checked = false;
+                    break;
+                case 2:
+                    chkUseFolderName.Checked = true; chkInclueTime.Checked = true;
+                    csvModule = "OMCSV";
+                    break;
+                case 3:
+                    chkUseFolderName.Checked = true; chkInclueTime.Checked = false;
+                    break;
+                case 4:
+                    chkUseFolderName.Checked = false; chkInclueTime.Checked = false;
+                    break;
+                case 5:
+                    chkUseFolderName.Checked = true; chkInclueTime.Checked = true;
+                    break;
+                case 6:
+                    chkUseFolderName.Checked = false; chkInclueTime.Checked = false;
+                    csvModule = "LU_AAI_CSV";
+                    break;
+                case 7:
+                    chkUseFolderName.Checked = true; chkInclueTime.Checked = true;
+                    break;
+                case 8:
+                    chkUseFolderName.Checked = false; chkInclueTime.Checked = false;
+                    csvModule = "Nypro_Promess_CSV";
+                    break;
+            }
+
+        }
+
+        private void ParserSetting_Click(object sender, EventArgs e)
+        {
+            chkInclueTime.Show();
+            chkUseFolderName.Show();
+        }
+
+        private void Form2_Load(object sender, EventArgs e)
+        {
+
+        }
+    }
+}
